@@ -1,11 +1,12 @@
 import asyncio
 import copy
-from decimal import Decimal
 import itertools as it
-from async_timeout import timeout
 import logging
 import re
 import time
+
+from async_timeout import timeout
+from decimal import Decimal
 from typing import (
     Dict,
     List,
@@ -16,6 +17,7 @@ from typing import (
     cast,
 )
 
+from hummingbot.connector.client_order_tracker import ClientOrderTracker
 from hummingbot.connector.connector_base import ConnectorBase
 from hummingbot.connector.gateway_in_flight_order import GatewayInFlightOrder
 from hummingbot.core.utils import async_ttl_cache
@@ -96,7 +98,7 @@ class GatewayEVMAMM(ConnectorBase):
         self._last_poll_timestamp = 0.0
         self._last_balance_poll_timestamp = time.time()
         self._last_est_gas_cost_reported = 0
-        self._in_flight_orders = {}
+        # self._in_flight_orders = {}
         self._allowances = {}
         self._chain_info = {}
         self._status_polling_task = None
@@ -105,6 +107,7 @@ class GatewayEVMAMM(ConnectorBase):
         self._poll_notifier = None
         self._nonce = None
         self._native_currency = "ETH"  # make ETH the default asset
+        self._order_tracker: ClientOrderTracker = ClientOrderTracker(connector=self)
 
     @property
     def connector_name(self):
@@ -148,16 +151,16 @@ class GatewayEVMAMM(ConnectorBase):
     def approval_orders(self) -> List[GatewayInFlightOrder]:
         return [
             approval_order
-            for approval_order in self._in_flight_orders.values()
-            if approval_order.client_order_id.split("-")[0] == "approve"
+            for approval_order in self._order_tracker.active_orders.values()
+            if approval_order.is_pending_approval()
         ]
 
     @property
     def amm_orders(self) -> List[GatewayInFlightOrder]:
         return [
             in_flight_order
-            for in_flight_order in self._in_flight_orders.values()
-            if in_flight_order.client_order_id.split("-")[0] in {"buy", "sell"}
+            for in_flight_order in self._order_tracker.active_orders.values()
+            if in_flight_order.is_open()
         ]
 
     @property
@@ -217,8 +220,10 @@ class GatewayEVMAMM(ConnectorBase):
         Approves contract as a spender for a token.
         :param token_symbol: token to approve.
         """
-        order_id: str = self.create_approval_order_id(token_symbol)
+        approval_id: str = self.create_approval_order_id(token_symbol)
         await self._update_nonce()
+
+        self.start_tracking_order(approval_id, None, token_symbol)
         resp: Dict[str, Any] = await GatewayHttpClient.get_instance().approve_token(
             self.chain,
             self.network,
@@ -227,19 +232,19 @@ class GatewayEVMAMM(ConnectorBase):
             self.connector_name,
             self._nonce
         )
-        self.start_tracking_order(order_id, None, token_symbol)
 
         if "hash" in resp.get("approval", {}).keys():
-            hash = resp["approval"]["hash"]
-            tracked_order = self._in_flight_orders.get(order_id)
-            tracked_order.update_exchange_order_id(hash)
+            approval_hash = resp["approval"]["hash"]
+            tracked_order = self._order_tracker.fetch_order(client_order_id=approval_id)
+            tracked_order
+            tracked_order.update_exchange_order_id(approval_hash)
             tracked_order.nonce = resp["nonce"]
             self.logger().info(
-                f"Maximum {token_symbol} approval for {self.connector_name} contract sent, hash: {hash}."
+                f"Maximum {token_symbol} approval for {self.connector_name} contract sent, hash: {approval_hash}."
             )
             return tracked_order
         else:
-            self.stop_tracking_order(order_id)
+            self.stop_tracking_order(approval_id)
             self.logger().info(f"Approval for {token_symbol} on {self.connector_name} failed.")
             return None
 
@@ -453,28 +458,31 @@ class GatewayEVMAMM(ConnectorBase):
                              trade_type: TradeType = TradeType.BUY,
                              price: Decimal = s_decimal_0,
                              amount: Decimal = s_decimal_0,
-                             gas_price: Decimal = s_decimal_0):
+                             gas_price: Decimal = s_decimal_0,
+                             is_approval: bool = False):
         """
         Starts tracking an order by simply adding it into _in_flight_orders dictionary.
         """
-        self._in_flight_orders[order_id] = GatewayInFlightOrder(
-            client_order_id=order_id,
-            exchange_order_id=exchange_order_id,
-            trading_pair=trading_pair,
-            order_type=OrderType.LIMIT,
-            trade_type=trade_type,
-            price=price,
-            amount=amount,
-            gas_price=gas_price,
-            creation_timestamp=self.current_timestamp
+        self._order_tracker.start_tracking_order(
+            GatewayInFlightOrder(
+                client_order_id=order_id,
+                exchange_order_id=exchange_order_id,
+                trading_pair=trading_pair,
+                order_type=OrderType.LIMIT,
+                trade_type=trade_type,
+                price=price,
+                amount=amount,
+                gas_price=gas_price,
+                creation_timestamp=self.current_timestamp,
+                is_approval=is_approval,
+            )
         )
 
     def stop_tracking_order(self, order_id: str):
         """
         Stops tracking an order by simply removing it from _in_flight_orders dictionary.
         """
-        if order_id in self._in_flight_orders:
-            del self._in_flight_orders[order_id]
+        self._order_tracker.stop_tracking_order(client_order_id=order_id)
 
     async def _update_token_approval_status(self, tracked_approvals: List[GatewayInFlightOrder]):
         """
