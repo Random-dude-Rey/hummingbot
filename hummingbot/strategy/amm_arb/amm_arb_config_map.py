@@ -103,7 +103,7 @@ amm_arb_config_map = {
         prompt="How much buffer do you want to add to the price to account for slippage for orders on the first market "
                "(Enter 1 for 1%)? >>> ",
         prompt_on_new=True,
-        default=Decimal("0.05"),
+        default=lambda: Decimal(1) if amm_arb_config_map["connector_1"].value in AllConnectorSettings.get_gateway_evm_amm_connector_names() else Decimal(0),
         validator=lambda v: validate_decimal(v),
         type_str="decimal"),
     "market_2_slippage_buffer": ConfigVar(
@@ -111,7 +111,7 @@ amm_arb_config_map = {
         prompt="How much buffer do you want to add to the price to account for slippage for orders on the second market"
                " (Enter 1 for 1%)? >>> ",
         prompt_on_new=True,
-        default=Decimal("0"),
+        default=lambda: Decimal(1) if amm_arb_config_map["connector_2"].value in AllConnectorSettings.get_gateway_evm_amm_connector_names() else Decimal(0),
         validator=lambda v: validate_decimal(v),
         type_str="decimal"),
     "concurrent_orders_submission": ConfigVar(
@@ -122,12 +122,19 @@ amm_arb_config_map = {
         default=False,
         validator=validate_bool,
         type_str="bool"),
+    "debug_price_shim": ConfigVar(
+        key="debug_price_shim",
+        prompt="Do you want to enable the debug price shim for integration tests? If you don't know what this does "
+               "you should keep it disabled. >>> ",
+        default=False,
+        validator=validate_bool,
+        type_str="bool"),
     "gateway_transaction_cancel_interval": ConfigVar(
         key="gateway_transaction_cancel_interval",
-        prompt="After what time should blockchain transactions be cancelled if they are not included in a block? (this only affects decentralized exchanges)"
-               "(Enter time in seconds) >>> ",
+        prompt="After what time should blockchain transactions be cancelled if they are not included in a block? "
+               "(this only affects decentralized exchanges) (Enter time in seconds) >>> ",
         prompt_on_new=True,
         default=600,
         validator=lambda v: validate_int(v, min_value=1, inclusive=True),
-        type_str="int")
+        type_str="int"),
 }

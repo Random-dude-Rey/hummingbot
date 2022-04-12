@@ -1,19 +1,16 @@
+import os.path
 import random
 import re
-from typing import Callable, Optional
 from decimal import Decimal
-import os.path
+from typing import Callable, Optional, Dict
 
 from tabulate import tabulate_formats
 
-from hummingbot.client.config.config_var import ConfigVar
 from hummingbot.client.config.config_methods import using_exchange as using_exchange_pointer
-from hummingbot.client.config.config_validators import (
-    validate_bool,
-    validate_decimal
-)
+from hummingbot.client.config.config_validators import validate_bool, validate_decimal
+from hummingbot.client.config.config_var import ConfigVar
 from hummingbot.client.settings import AllConnectorSettings, DEFAULT_KEY_FILE_PATH, DEFAULT_LOG_FILE_PATH
-from hummingbot.core.rate_oracle.rate_oracle import RateOracleSource, RateOracle
+from hummingbot.core.rate_oracle.rate_oracle import RateOracle, RateOracleSource
 
 
 def generate_client_id() -> str:
@@ -34,8 +31,7 @@ def validate_script_file_path(file_path: str) -> Optional[bool]:
         return f"{file_path} file does not exist."
 
 
-def connector_keys():
-    from hummingbot.client.settings import AllConnectorSettings
+def connector_keys() -> Dict[str, ConfigVar]:
     all_keys = {}
     for connector_setting in AllConnectorSettings.get_connector_settings().values():
         all_keys.update(connector_setting.config_keys)
@@ -123,33 +119,6 @@ main_config_map = {
                   required_if=lambda: global_config_map["celo_address"].value is not None,
                   is_secure=True,
                   is_connect_key=True),
-    "ethereum_wallet":
-        ConfigVar(key="ethereum_wallet",
-                  prompt="Enter your ETH wallet private key >>> ",
-                  type_str="str",
-                  required_if=lambda: False,
-                  is_connect_key=True),
-    "ethereum_rpc_url":
-        ConfigVar(key="ethereum_rpc_url",
-                  prompt="Which Ethereum node would you like your client to connect to? >>> ",
-                  required_if=lambda: global_config_map["ethereum_wallet"].value is not None),
-    "ethereum_rpc_ws_url":
-        ConfigVar(key="ethereum_rpc_ws_url",
-                  prompt="Enter the Websocket Address of your Ethereum Node >>> ",
-                  required_if=lambda: global_config_map["ethereum_rpc_url"].value is not None),
-    "ethereum_chain_name":
-        ConfigVar(key="ethereum_chain_name",
-                  prompt="What is your preferred ethereum chain name (MAIN_NET, KOVAN)? >>> ",
-                  type_str="str",
-                  required_if=lambda: False,
-                  validator=lambda s: None if s in {"MAIN_NET", "KOVAN", "mainnet", "testnet"} else "Invalid chain name.",
-                  default="MAIN_NET"),
-    "ethereum_token_list_url":
-        ConfigVar(key="ethereum_token_list_url",
-                  prompt="Specify token list url of a list available on https://tokenlists.org/ >>> ",
-                  type_str="str",
-                  required_if=lambda: global_config_map["ethereum_wallet"].value is not None,
-                  default="https://defi.cmc.eth.link/"),
     "kill_switch_enabled":
         ConfigVar(key="kill_switch_enabled",
                   prompt="Would you like to enable the kill switch? (Yes/No) >>> ",
@@ -266,17 +235,17 @@ main_config_map = {
                   type_str="str",
                   required_if=lambda: False,
                   default="5000"),
-    "heartbeat_enabled":
-        ConfigVar(key="heartbeat_enabled",
-                  prompt="Do you want to enable aggregated order and trade data collection? >>> ",
+    "anonymized_metrics_enabled":
+        ConfigVar(key="anonymized_metrics_enabled",
+                  prompt="Do you want to report aggregated, anonymized trade volume by exchange to "
+                         "Hummingbot Foundation? >>> ",
                   required_if=lambda: False,
                   type_str="bool",
                   validator=validate_bool,
                   default=True),
-    "heartbeat_interval_min":
-        ConfigVar(key="heartbeat_interval_min",
-                  prompt="How often do you want Hummingbot to send aggregated order and trade data (in minutes, "
-                         "e.g. enter 5 for once every 5 minutes)? >>> ",
+    "anonymized_metrics_interval_min":
+        ConfigVar(key="anonymized_metrics_interval_min",
+                  prompt="How often do you want to send the anonymized metrics (Enter 5 for 5 minutes)? >>> ",
                   required_if=lambda: False,
                   type_str="decimal",
                   validator=lambda v: validate_decimal(v, Decimal(0), inclusive=False),
@@ -447,7 +416,7 @@ paper_trade_config_map = {
     "paper_trade_account_balance":
         ConfigVar(key="paper_trade_account_balance",
                   prompt="Enter paper trade balance settings (Input must be valid json: "
-                         "e.g. [[\"ETH\", 10.0], [\"USDC\", 100]]) >>> ",
+                         "e.g. {\"ETH\": 10, \"USDC\": 50000}) >>> ",
                   required_if=lambda: False,
                   type_str="json",
                   ),

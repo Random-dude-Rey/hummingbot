@@ -3,13 +3,37 @@ import logging
 import ssl
 
 from decimal import Decimal
+from enum import Enum
 from typing import Optional, Any, Dict, List, Union
 
 from hummingbot.client.config.global_config_map import global_config_map
 from hummingbot.client.config.security import Security
 from hummingbot.core.event.events import TradeType
-from hummingbot.core.gateway import get_gateway_paths
+from hummingbot.core.gateway import (
+    detect_existing_gateway_container,
+    get_gateway_paths,
+    restart_gateway
+)
 from hummingbot.logger import HummingbotLogger
+
+
+class GatewayError(Enum):
+    """
+    The gateway route error codes defined in /gateway/src/services/error-handler.ts
+    """
+
+    Network = 1001
+    RateLimit = 1002
+    OutOfGas = 1003
+    TransactionGasPriceTooLow = 1004
+    LoadWallet = 1005
+    TokenNotSupported = 1006
+    TradeFailed = 1007
+    SwapPriceExceedsLimitPrice = 1008
+    SwapPriceLowerThanLimitPrice = 1009
+    ServiceUnitialized = 1010
+    UnknownChainError = 1011
+    UnknownError = 1099
 
 
 class GatewayHttpClient:
@@ -72,6 +96,38 @@ class GatewayHttpClient:
     def base_url(self, url: str):
         self._base_url = url
 
+    def log_error_codes(self, resp: Dict[str, Any]):
+        """
+        If the API returns an error code, interpret the code, log a useful
+        message to the user, then raise an exception.
+        """
+        error_code: Optional[int] = resp.get("errorCode")
+        if error_code is not None:
+            if error_code == GatewayError.Network.value:
+                self.logger().info("Gateway had a network error. Make sure it is still able to communicate with the node.")
+            elif error_code == GatewayError.RateLimit.value:
+                self.logger().info("Gateway was unable to communicate with the node because of rate limiting.")
+            elif error_code == GatewayError.OutOfGas.value:
+                self.logger().info("There was an out of gas error. Adjust the gas limit in the gateway config.")
+            elif error_code == GatewayError.TransactionGasPriceTooLow.value:
+                self.logger().info("The gas price provided by gateway was too low to create a blockchain operation. Consider increasing the gas price.")
+            elif error_code == GatewayError.LoadWallet.value:
+                self.logger().info("Gateway failed to load your wallet. Try running 'gateway connect' with the correct wallet settings.")
+            elif error_code == GatewayError.TokenNotSupported.value:
+                self.logger().info("Gateway tried to use an unsupported token.")
+            elif error_code == GatewayError.TradeFailed.value:
+                self.logger().info("The trade on gateway has failed.")
+            elif error_code == GatewayError.ServiceUnitialized.value:
+                self.logger().info("Some values was uninitialized. Please contact dev@hummingbot.io ")
+            elif error_code == GatewayError.SwapPriceExceedsLimitPrice.value:
+                self.logger().info("The swap price is greater than your limit buy price. The market may be too volatile or your slippage rate is too low. Try adjusting the strategy's allowed slippage rate.")
+            elif error_code == GatewayError.SwapPriceLowerThanLimitPrice.value:
+                self.logger().info("The swap price is lower than your limit sell price. The market may be too volatile or your slippage rate is too low. Try adjusting the strategy's allowed slippage rate.")
+            elif error_code == GatewayError.UnknownChainError.value:
+                self.logger().info("An unknown chain error has occurred on gateway. Make sure your gateway settings are correct.")
+            elif error_code == GatewayError.UnknownError.value:
+                self.logger().info("An unknown error has occurred on gateway. Please send your logs to dev@hummingbot.io")
+
     async def api_request(
             self,
             method: str,
@@ -103,6 +159,8 @@ class GatewayHttpClient:
                 raise ValueError(f"Unsupported request method {method}")
             parsed_response = await response.json()
             if response.status != 200 and not fail_silently:
+                self.log_error_codes(parsed_response)
+
                 if "error" in parsed_response:
                     raise ValueError(f"Error on {method.upper()} {url} Error: {parsed_response['error']}")
                 else:
@@ -135,10 +193,19 @@ class GatewayHttpClient:
             )
 
     async def update_config(self, config_path: str, config_value: Any) -> Dict[str, Any]:
-        return await self.api_request("post", "config/update", {
+        response = await self.api_request("post", "config/update", {
             "configPath": config_path,
             "configValue": config_value,
         })
+
+        # temporary code until #25625 is implemented (delete afterwards)
+        # if the user had a gateway in a container, restart it
+        # otherwise if they manually run a gateway, they need to restart it themselves
+        container_info: Optional[Dict[str, Any]] = await detect_existing_gateway_container()
+        if container_info is not None:
+            await restart_gateway()
+
+        return response
 
     async def get_connectors(self, fail_silently: bool = False) -> Dict[str, Any]:
         return await self.api_request("get", "connectors", fail_silently=fail_silently)
@@ -201,19 +268,26 @@ class GatewayHttpClient:
             address: str,
             token: str,
             spender: str,
-            nonce: int
+            nonce: int,
+            max_fee_per_gas: Optional[int] = None,
+            max_priority_fee_per_gas: Optional[int] = None
     ) -> Dict[str, Any]:
+        request_payload: Dict[str, Any] = {
+            "chain": chain,
+            "network": network,
+            "address": address,
+            "token": token,
+            "spender": spender,
+            "nonce": nonce
+        }
+        if max_fee_per_gas is not None:
+            request_payload["maxFeePerGas"] = str(max_fee_per_gas)
+        if max_priority_fee_per_gas is not None:
+            request_payload["maxPriorityFeePerGas"] = str(max_priority_fee_per_gas)
         return await self.api_request(
             "post",
             "evm/approve",
-            {
-                "chain": chain,
-                "network": network,
-                "address": address,
-                "token": token,
-                "spender": spender,
-                "nonce": nonce
-            }
+            request_payload
         )
 
     async def get_allowances(
@@ -309,10 +383,12 @@ class GatewayHttpClient:
             side: TradeType,
             amount: Decimal,
             price: Decimal,
-            nonce: int
+            nonce: int,
+            max_fee_per_gas: Optional[int] = None,
+            max_priority_fee_per_gas: Optional[int] = None
     ) -> Dict[str, Any]:
         # XXX(martin_kou): The amount is always output with 18 decimal places.
-        return await self.api_request("post", "amm/trade", {
+        request_payload: Dict[str, Any] = {
             "chain": chain,
             "network": network,
             "connector": connector,
@@ -323,4 +399,21 @@ class GatewayHttpClient:
             "amount": f"{amount:.18f}",
             "limitPrice": str(price),
             "nonce": nonce
+        }
+        if max_fee_per_gas is not None:
+            request_payload["maxFeePerGas"] = str(max_fee_per_gas)
+        if max_priority_fee_per_gas is not None:
+            request_payload["maxPriorityFeePerGas"] = str(max_priority_fee_per_gas)
+        return await self.api_request("post", "amm/trade", request_payload)
+
+    async def amm_estimate_gas(
+            self,
+            chain: str,
+            network: str,
+            connector: str,
+    ) -> Dict[str, Any]:
+        return await self.api_request("post", "amm/estimateGas", {
+            "chain": chain,
+            "network": network,
+            "connector": connector,
         })
